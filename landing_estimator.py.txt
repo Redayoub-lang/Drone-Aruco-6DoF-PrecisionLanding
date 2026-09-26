@@ -1,0 +1,148 @@
+"""
+Autonomous Drone GPS-Denied 6-DoF Precision Landing Estimator
+Developer: Ayoub Lahmar (@Redayoub-lang)
+Target Program: Bachelor's in Computer Science & Technology @ Jiangsu University (JSU)
+"""
+
+import math
+import cv2
+import numpy as np
+
+
+class PrecisionLandingEstimator:
+
+  def __init__(
+      self,
+      marker_size_meters: float = 0.20,
+      focal_length: float = 600.0,
+      frame_size: tuple = (640, 480),
+  ):
+    self.marker_size = marker_size_meters
+    cx, cy = frame_size[0] / 2.0, frame_size[1] / 2.0
+
+    # Camera Intrinsic Matrix
+    self.camera_matrix = np.array(
+        [[focal_length, 0.0, cx], [0.0, focal_length, cy], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    self.dist_coeffs = np.zeros((4, 1), dtype=np.float32)
+
+    # ArUco Configuration
+    self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    self.aruco_params = cv2.aruco.DetectorParameters()
+    self.detector = cv2.aruco.ArucoDetector(
+        self.aruco_dict, self.aruco_params
+    )
+
+    # 3D Reference Marker Corner Coordinates (Centered Origin)
+    m = self.marker_size / 2.0
+    self.obj_points = np.array(
+        [[-m, m, 0.0], [m, m, 0.0], [m, -m, 0.0], [-m, -m, 0.0]],
+        dtype=np.float32,
+    )
+
+  def estimate_pose(self, frame: np.ndarray) -> tuple[np.ndarray, dict]:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = self.detector.detectMarkers(gray)
+
+    telemetry = {
+        "detected": False,
+        "X": 0.0,
+        "Y": 0.0,
+        "Z": 0.0,
+        "Yaw": 0.0,
+        "Pitch": 0.0,
+        "Roll": 0.0,
+    }
+
+    if ids is not None and len(corners) > 0:
+      # Solve Perspective-n-Point (PnP) for exact relative pose
+      success, rvec, tvec = cv2.solvePnP(
+          self.obj_points,
+          corners[0][0],
+          self.camera_matrix,
+          self.dist_coeffs,
+          flags=cv2.SOLVEPNP_ITERATIVE,
+      )
+
+      if success:
+        rmat, _ = cv2.Rodrigues(rvec)
+
+        # Extract Tait-Bryan Euler Angles (Yaw, Pitch, Roll)
+        sy = math.sqrt(rmat[0, 0] * rmat[0, 0] + rmat[1, 0] * rmat[1, 0])
+        singular = sy < 1e-6
+
+        if not singular:
+          roll = math.atan2(rmat[2, 1], rmat[2, 2])
+          pitch = math.atan2(-rmat[2, 0], sy)
+          yaw = math.atan2(rmat[1, 0], rmat[0, 0])
+        else:
+          roll = math.atan2(-rmat[1, 2], rmat[1, 1])
+          pitch = math.atan2(-rmat[2, 0], sy)
+          yaw = 0.0
+
+        telemetry.update({
+            "detected": True,
+            "X": float(tvec[0][0]),
+            "Y": float(tvec[1][0]),
+            "Z": float(tvec[2][0]),
+            "Yaw": math.degrees(yaw),
+            "Pitch": math.degrees(pitch),
+            "Roll": math.degrees(roll),
+        })
+
+        # Draw HUD Axes and Target Boundaries
+        cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+        cv2.drawFrameAxes(
+            frame, self.camera_matrix, self.dist_coeffs, rvec, tvec, 0.1
+        )
+
+    # Render Telemetry Overlay
+    color = (0, 255, 0) if telemetry["detected"] else (0, 0, 255)
+    cv2.putText(
+        frame,
+        f"TARGET LOCK: {telemetry['detected']}",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        color,
+        2,
+    )
+    cv2.putText(
+        frame,
+        f"X: {telemetry['X']:.2f}m | Y: {telemetry['Y']:.2f}m | Z:"
+        f" {telemetry['Z']:.2f}m",
+        (10, 55),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 255),
+        1,
+    )
+    cv2.putText(
+        frame,
+        f"YAW: {telemetry['Yaw']:.1f}deg | PITCH: {telemetry['Pitch']:.1f}deg",
+        (10, 75),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 255),
+        1,
+    )
+
+    return frame, telemetry
+
+
+if __name__ == "__main__":
+  estimator = PrecisionLandingEstimator()
+
+  # Synthetic Frame Harness with Generated ArUco Target
+  canvas = np.zeros((480, 640, 3), dtype=np.uint8)
+  marker_img = cv2.aruco.generateImageMarker(
+      estimator.aruco_dict, id=0, sidePixels=160
+  )
+  canvas[160:320, 240:400] = cv2.cvtColor(marker_img, cv2.COLOR_GRAY2BGR)
+
+  processed, data = estimator.estimate_pose(canvas)
+  print(
+      f"[SYSTEM VERIFIED] Lock Status: {data['detected']} | Position (X,Y,Z):"
+      f" ({data['X']:.2f}m, {data['Y']:.2f}m, {data['Z']:.2f}m)"
+  )
